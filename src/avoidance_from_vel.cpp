@@ -37,7 +37,7 @@ public:
         this->declare_parameter<double>("robot_length", 0.1);
         this->declare_parameter<double>("lidar_forward_offset", 0.1);
         this->declare_parameter<double>("lidar_lateral_offset", 0.0); // 簡単のため0と仮定
-
+        this->declare_parameter<double>("prediction_time",0.1);
 
         // 初期パラメータ値の取得
         this->get_parameter("iswork", isWork_);
@@ -251,7 +251,8 @@ private:
             double max_angular_vel = this->get_parameter("max_angular_vel").as_double();
             double min_linear_vel_factor = this->get_parameter("min_linear_vel_factor").as_double();
             double distance_threshold = this->get_parameter("distance_threshold").as_double();
-
+            double prediction_time = this -> get_parameter("prediction_time").as_double();
+            double linear_vel_threshold = 0.01;
             // --- 目標移動方向と障害物との相対角度に基づく回避計算 ---
 
             // 1. 目標とする移動方向の角度 (ロボット座標系) を決定
@@ -262,59 +263,58 @@ private:
             //    - 瞬間的な旋回 (angular.z) はここでは考慮せず、障害物の相対位置に基づいて回避方向を決める。
             double target_direction_angle = 0.0; // [rad] ロボットの前方を目標方向とする
 
-            // 2. 障害物の角度 (ロボット座標系、LIDAR正面が0rad)
-            double obstacle_angle = closest_obstacle_angle_; // [rad]
+                        // 前進している場合のみ、角速度に基づいて予測角度を計算
+            if (cmd_vel_remote_.linear.x > linear_vel_threshold) {
+                // prediction_time 秒後の向きの変化量を目標角度とする
+                target_direction_angle = cmd_vel_remote_.angular.z * prediction_time;
 
-            // 3. 目標移動方向に対する障害物の相対角度を計算
-            //    relative_angle = obstacle_angle - target_direction_angle
-            //    target_direction_angle が 0 なので、 relative_angle = obstacle_angle となる。
-            double relative_angle_to_target = obstacle_angle; // [rad]
+                // 計算された角度を -PI から +PI の範囲に正規化しておくと安全
+                target_direction_angle = atan2(sin(target_direction_angle), cos(target_direction_angle));
+            }
+            // 静止、その場回転、後退の場合は target_direction_angle は 0.0 のまま (前方基準)
 
-            // 4. 回避のための追加旋回速度 (obstacle_avoidance_turn) を計算
-            //    - 旋回方向: 目標方向に対して障害物がある方向と逆向きに旋回する。
-            //      - relative_angle_to_target > 0 (目標の左に障害物) -> 右旋回 (負の角速度)
-            //      - relative_angle_to_target < 0 (目標の右に障害物) -> 左旋回 (正の角速度)
-            //    - 旋回強度:
-            //      - 障害物までの距離 (closest_obstacle_dist_) が近いほど強く旋回する。
-            //      - 距離による係数 (turn_strength_factor) を計算 (0.0〜1.0)。
-            //        min_avoidance_dist で最大強度(1.0)、distance_threshold で強度0(0.0)。
-            double turn_strength_factor = (distance_threshold - closest_obstacle_dist_) / (distance_threshold - min_avoidance_dist + 1e-6); // ゼロ割防止
-            turn_strength_factor = std::clamp(turn_strength_factor, 0.0, 1.0); // 0.0から1.0の間に制限
+            // --- 2. 障害物の角度 (ロボット座標系、LIDAR正面が0rad) ---
+            double obstacle_angle = closest_obstacle_angle_; // [rad] これは変更なし
+
+            // --- 3. 目標移動方向に対する障害物の相対角度を計算 ---
+            // 障害物の角度から、計算した目標方向の角度を引く
+            double angle_diff = obstacle_angle - target_direction_angle;
+            // 差分角度を -PI から +PI の範囲に正規化 (重要)
+            double relative_angle_to_target = atan2(sin(angle_diff), cos(angle_diff));
+
+            // --- 4. 回避のための追加旋回速度 (obstacle_avoidance_turn) を計算 ---
+            // この計算自体は変更なしだが、入力となる relative_angle_to_target が新しくなった
+            double turn_strength_factor = (distance_threshold - closest_obstacle_dist_) / (distance_threshold - min_avoidance_dist + 1e-6);
+            turn_strength_factor = std::clamp(turn_strength_factor, 0.0, 1.0);
 
             // 回避旋回速度 = 旋回方向決定因子 * 基本ゲイン * 距離による強度係数
-            // copysign(1.0, angle) は angle の符号を返す (+1 or -1)。- をつけて逆方向にする。
+            // copysign の入力に新しい relative_angle_to_target を使う
             double obstacle_avoidance_turn = -std::copysign(1.0, relative_angle_to_target + 1e-6) // ゼロ付近の不安定さ回避
-                                             * avoidance_gain
-                                             * turn_strength_factor;
+                                    * avoidance_gain
+                                    * turn_strength_factor;
 
-            // 5. 最終的な角速度を計算
-            //    元の指令角速度 (cmd_vel_remote_.angular.z) に回避旋回成分を加算する。
+            // --- 5. 最終的な角速度を計算 ---
+            // この計算は変更なし (元の指令角速度 + 回避旋回)
             cmd_msg.angular.z = cmd_vel_remote_.angular.z + obstacle_avoidance_turn;
-            // 最大角速度で制限
             cmd_msg.angular.z = std::clamp(cmd_msg.angular.z, -max_angular_vel, max_angular_vel);
 
-            // 6. 最終的な並進速度を計算
-            //    - 障害物に近づくほど速度を落とす。
-            //    - 距離による速度低減係数 (speed_reduction_factor) を計算 (min_linear_vel_factor〜1.0)。
-            //      min_avoidance_dist で最低速度比率(min_linear_vel_factor)、distance_threshold で元の速度(1.0)。
-            double speed_reduction_factor = (closest_obstacle_dist_ - min_avoidance_dist) / (distance_threshold - min_avoidance_dist + 1e-6); // ゼロ割防止
-            speed_reduction_factor = std::clamp(speed_reduction_factor, min_linear_vel_factor, 1.0); // min_linear_vel_factor から 1.0 の間に制限
-
-            // 元の指令速度に低減係数をかける
+            // --- 6. 最終的な並進速度を計算 ---
+            // この計算は変更なし
+            double speed_reduction_factor = (closest_obstacle_dist_ - min_avoidance_dist) / (distance_threshold - min_avoidance_dist + 1e-6);
+            speed_reduction_factor = std::clamp(speed_reduction_factor, min_linear_vel_factor, 1.0);
             cmd_msg.linear.x = cmd_vel_remote_.linear.x * speed_reduction_factor;
-            // 並進速度が負にならないように保証 (AVOIDINGに入る条件から通常は正のはず)
             cmd_msg.linear.x = std::max(0.0, cmd_msg.linear.x);
 
-            // 7. 緊急停止条件
-            //    障害物が非常に近い場合 (min_avoidance_dist 未満) は完全に停止
+            // --- 7. 緊急停止条件 ---
+            // この処理は変更なし
             if (closest_obstacle_dist_ < min_avoidance_dist) {
-                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                                       "Obstacle too close (%.2f m < %.2f m)! Stopping linear motion.",
                                       closest_obstacle_dist_, min_avoidance_dist);
-                 cmd_msg.linear.x = 0.0;
-                 // この場合、回避旋回は継続する設定。必要なら旋回も停止させる。
-                 // cmd_msg.angular.z = 0.0; // 必要なら追加
+                cmd_msg.linear.x = 0.0;
+                // cmd_msg.angular.z = 0.0; // 必要なら旋回も停止
             }
+
 
             // --- デバッグログ ---
             RCLCPP_INFO(this->get_logger(), "AVOIDING: Obst(d=%.2f, a=%.2f), Remote(lx=%.2f, az=%.2f), TargetAngle=%.2f, RelAngle=%.2f, AvoidTurn=%.2f -> Final(lx=%.2f, az=%.2f)",
