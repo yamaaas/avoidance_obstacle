@@ -255,15 +255,9 @@ private:
             double linear_vel_threshold = 0.01;
             // --- 目標移動方向と障害物との相対角度に基づく回避計算 ---
 
-            // 1. 目標とする移動方向の角度 (ロボット座標系) を決定
-            //    - cmd_vel_remote_.linear.x > 0 の場合（AVOIDING状態に入る条件）、
-            //      主要な目標方向は「前方」(0 rad) とみなす。
-            //    - 静止状態 (linear.x=0, angular.z=0) は update_state で除外されているが、
-            //      仮に静止時も回避するなら、目標方向は「前方」と考える（ユーザー指定）。
-            //    - 瞬間的な旋回 (angular.z) はここでは考慮せず、障害物の相対位置に基づいて回避方向を決める。
-            double target_direction_angle = 0.0; // [rad] ロボットの前方を目標方向とする
+           double target_direction_angle = 0.0; // [rad] ロボットの前方を目標方向とする
 
-                        // 前進している場合のみ、角速度に基づいて予測角度を計算
+            // 前進している場合のみ、角速度に基づいて予測角度を計算
             if (cmd_vel_remote_.linear.x > linear_vel_threshold) {
                 // prediction_time 秒後の向きの変化量を目標角度とする
                 target_direction_angle = cmd_vel_remote_.angular.z * prediction_time;
