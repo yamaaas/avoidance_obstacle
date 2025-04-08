@@ -175,8 +175,24 @@ private:
             // --- 矩形領域内の判定 ---
             // X座標が指定範囲内か？
             // Y座標が指定範囲内か？ (絶対値で左右両方を見る)
-            bool in_detection_zone = (abs(x + robot_length/2 - lidar_forward_offset) >= x_min_detect && abs(x + robot_length/2 - lidar_forward_offset) < x_max_detect &&
-                                      std::abs(y) < y_max_abs_detect && abs(y) >= robot_width/2);
+           // bool in_detection_zone = (abs(x + robot_length/2 - lidar_forward_offset) >= x_min_detect && abs(x + robot_length/2 - lidar_forward_offset) < x_max_detect &&
+            //std::abs(y) < y_max_abs_detect && abs(y) >= robot_width/2);
+            
+            bool in_detection_zone = true;
+
+            if((abs(y) < y_max_abs_detect) && (abs(x + (robot_length/2) - lidar_forward_offset) < x_max_detect)){
+              if(abs(y)>(robot_width/2) || (abs(x + (robot_length/2) - lidar_forward_offset) >= x_min_detect)){
+                in_detection_zone = true;
+              }
+              else {
+                in_detection_zone = false;
+              }
+            }
+            else{
+              in_detection_zone = false;
+            }
+
+
 
             if (in_detection_zone) {
                 obstacle_found_in_scan = true;
